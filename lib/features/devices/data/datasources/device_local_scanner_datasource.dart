@@ -6,7 +6,20 @@ import '../../domain/entities/connected_device.dart';
 import 'device_datasource.dart';
 import '../../../../core/error/exceptions.dart';
 
-// Paquete M-SEARCH SSDP/UPnP (RFC 2616)
+// WS-Discovery (WSD - RFC SOAP) — Probe XML enviado por Windows 10/11 en puerto UDP 3702
+const String _wsdProbeXml = '''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+  <soap:Header>
+    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
+    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
+    <wsa:MessageID>urn:uuid:a1b2c3d4-e5f6-7890-abcd-ef1234567890</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wsd:Probe/>
+  </soap:Body>
+</soap:Envelope>''';
+
+// SSDP M-SEARCH (RFC 2616) — UPnP discovery en puerto UDP 1900
 const List<int> _ssdpMSearch = [
   0x4d, 0x2d, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x20, 0x2a, 0x20,
   0x48, 0x54, 0x54, 0x50, 0x2f, 0x31, 0x2e, 0x31, 0x0d, 0x0a,
@@ -19,7 +32,7 @@ const List<int> _ssdpMSearch = [
   0x61, 0x6c, 0x6c, 0x0d, 0x0a, 0x0d, 0x0a,
 ];
 
-// NetBIOS Name Query (RFC 1002)
+// NetBIOS Name Query (RFC 1002) — Puerto UDP 137
 const List<int> _netbiosNameQuery = [
   0x82, 0x28, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x20, 0x43, 0x4b, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
@@ -27,18 +40,6 @@ const List<int> _netbiosNameQuery = [
   0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
   0x41, 0x00, 0x00, 0x21, 0x00, 0x01,
 ];
-
-// Resultado de la sonda TCP por IP
-enum _TcpResult { open, refused, timeout, unreachable }
-
-class _ProbeResult {
-  final String ip;
-  final _TcpResult result;
-  final String detail;
-  final String? mac; // MAC real de ARP si está disponible
-
-  _ProbeResult(this.ip, this.result, this.detail, {this.mac});
-}
 
 class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
   final NetworkInfo networkInfo;
@@ -49,15 +50,15 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
   Future<List<ConnectedDevice>> getConnectedDevices() async {
     final Stopwatch sw = Stopwatch()..start();
     print('>>> =======================================================');
-    print('>>> ISP Scanner v1.0.11 — ARP Estricto + TCP Sin Falsos Positivos');
+    print('>>> ISP Scanner v1.0.12 — Motor Multiprotocolo (WSD + UDP Broadcast + TCP)');
 
-    // ── Permisos
+    // 1. Permisos de ubicación (requeridos para leer la IP local del Wi-Fi)
     final permStatus = await Permission.location.request();
     if (!permStatus.isGranted) {
       throw PermissionException('Permisos de ubicación denegados.');
     }
 
-    // ── IP local
+    // 2. Obtención de la IP local
     final String? localIp = await networkInfo.getWifiIP();
     print('>>> IP local del dispositivo: $localIp');
     if (localIp == null || localIp.isEmpty || localIp == '0.0.0.0') {
@@ -67,121 +68,86 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
     final parts = localIp.split('.');
     if (parts.length != 4) throw PermissionException('IP inválida: $localIp');
     final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-    final broadcast = '$subnet.255';
-    print('>>> Subred objetivo: $subnet.1 – $subnet.254');
+    final broadcastIp = '$subnet.255';
+    print('>>> Subred objetivo: $subnet.1 – $subnet.254 | Broadcast: $broadcastIp');
 
-    // Mapa de resultados final (IP → ConnectedDevice)
-    final Map<String, ConnectedDevice> found = {};
+    // Registro consolidado de dispositivos (IP -> ConnectedDevice)
+    final Map<String, ConnectedDevice> discovered = {};
 
-    // ═══════════════════════════════════════════════════════
-    // FASE 0 — ARP KICK PARALELO (50ms timeout por socket)
-    // Envia un intento TCP a cada IP simultáneamente.
-    // Objetivo: forzar que el kernel Android resuelva la MAC
-    // de cada host a través de ARP antes de continuar.
-    // ═══════════════════════════════════════════════════════
-    print('>>> [F0] ARP KICK — Enviando 254 sondas UDP paralelas (50ms)...');
-    await _arpKickParallel(subnet, localIp);
+    // ═════════════════════════════════════════════════════════════════════════
+    // CAPA 1: DISCOVERY UDP MULTIPROTOCOLO (WSD 3702 + SSDP 1900 + mDNS 5353 + NetBIOS 137)
+    // ═════════════════════════════════════════════════════════════════════════
+    print('>>> [CAPA 1 - UDP] Lanzando sondas multiprotocolo WSD/SSDP/mDNS/NetBIOS...');
+    final Map<String, String> udpResults = await _udpMultiprotocolDiscovery(
+      subnet: subnet,
+      broadcastIp: broadcastIp,
+      localIp: localIp,
+    );
 
-    // Pausa crítica: dar tiempo al kernel para registrar respuestas ARP
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    // ═══════════════════════════════════════════════════════
-    // FASE 1 — LECTURA TABLA ARP (/proc/net/arp + ip neigh)
-    // Extrae MACs válidas del cache ARP del kernel.
-    // Funciona aunque todos los puertos TCP/UDP estén cerrados.
-    // ═══════════════════════════════════════════════════════
-    print('>>> [F1] ARP READ — Leyendo tabla ARP del kernel...');
-    final Map<String, String> arpTable = await _readArpTable(subnet, localIp);
-    print('>>> [F1] ARP READ — IPs con MAC válida: ${arpTable.length} → ${arpTable.keys.toList()}');
-
-    for (final e in arpTable.entries) {
-      if (e.key == localIp) continue;
-      print('>>> [ARP ✓] Dispositivo real: ${e.key} (MAC: ${e.value})');
-      found[e.key] = _makeDevice(
-        ip: e.key,
-        name: _guessByIp(e.key),
-        mac: e.value,
-        label: 'LAN/Wi-Fi (ARP - MAC: ${e.value})',
+    for (final entry in udpResults.entries) {
+      final ip = entry.key;
+      final protocol = entry.value;
+      print('>>> [UDP ✓] DISPOSITIVO ENCONTRADO: $ip | Método: $protocol');
+      discovered[ip] = _buildDevice(
+        ip: ip,
+        detectionMethod: protocol,
         localIp: localIp,
       );
     }
+    print('>>> [CAPA 1 - UDP] Total detectados por UDP: ${udpResults.length}');
 
-    // ═══════════════════════════════════════════════════════
-    // FASE 2 — UDP BROADCAST (SSDP + NetBIOS + mDNS, 500ms)
-    // Captura respuestas de servicios de anuncio de red.
-    // ═══════════════════════════════════════════════════════
-    print('>>> [F2] UDP BROADCAST — SSDP:1900 + NetBIOS:137 + mDNS:5353...');
-    final Map<String, String> udp = await _udpBroadcast(subnet, broadcast, localIp);
-    for (final e in udp.entries) {
-      if (!found.containsKey(e.key)) {
-        print('>>> [UDP ✓] Dispositivo broadcast: ${e.key} (${e.value})');
-        found[e.key] = _makeDevice(
-          ip: e.key,
-          name: _guessByIp(e.key),
-          mac: arpTable[e.key],
-          label: e.value,
+    // ═════════════════════════════════════════════════════════════════════════
+    // CAPA 2: LECTURA ARP KERNEL (Bypassea reglas de Firewall si el ARP se resolvió)
+    // ═════════════════════════════════════════════════════════════════════════
+    print('>>> [CAPA 2 - ARP] Consultando tabla de vecinos ARP del SO...');
+    final Map<String, String> arpEntries = await _readArpTable(subnet, localIp);
+    for (final entry in arpEntries.entries) {
+      final ip = entry.key;
+      final mac = entry.value;
+      if (!discovered.containsKey(ip)) {
+        print('>>> [ARP ✓] DISPOSITIVO ENCONTRADO: $ip | MAC: $mac');
+        discovered[ip] = _buildDevice(
+          ip: ip,
+          mac: mac,
+          detectionMethod: 'Tabla ARP Kernel (MAC: $mac)',
           localIp: localIp,
         );
       }
     }
 
-    // ═══════════════════════════════════════════════════════
-    // FASE 3 — TCP PARALELO (300ms timeout)
-    //
-    // Solo se considera vivo un host si:
-    //  ① Conexión exitosa (puerto abierto)
-    //  ② errno 111 / "refused" / "reset" → TCP RST del host destino
-    //
-    // Timeout → DESCARTADO (el kernel tarda ~3s en emitir EHOSTUNREACH
-    //   para IPs que no existen, más que nuestro timeout → falsos positivos)
-    //
-    // EHOSTUNREACH (errno 113) → IP vacía, descartada.
-    // ═══════════════════════════════════════════════════════
-    final List<int> ports = [135, 139, 445, 5357, 2869, 80, 443, 5353, 8080];
-    print('>>> [F3] TCP ESTRICTO — 254 IPs × ${ports.length} puertos (300ms timeout)...');
+    // ═════════════════════════════════════════════════════════════════════════
+    // CAPA 3: BARRIDO PARALELO DE PUERTOS TCP (135, 445, 5357, 3702, 80, 443, 8080, 8000)
+    // ═════════════════════════════════════════════════════════════════════════
+    final List<int> tcpPorts = [135, 445, 5357, 3702, 80, 443, 8080, 8000];
+    print('>>> [CAPA 3 - TCP] Escaneando 254 IPs en paralelo (timeout 250ms)...');
+    print('>>> Puertos TCP analizados: ${tcpPorts.join(', ')}');
 
-    final List<Future<_ProbeResult>> tasks = [
+    final List<Future<MapEntry<String, String>?>> tcpTasks = [
       for (int i = 1; i <= 254; i++)
-        _tcpProbe('$subnet.$i', ports, localIp, arpTable['$subnet.$i']),
+        _probeTcpHost('$subnet.$i', tcpPorts, localIp)
     ];
-    final List<_ProbeResult> probes = await Future.wait(tasks);
 
-    for (final p in probes) {
-      if (p.ip == localIp) continue;
+    final List<MapEntry<String, String>?> tcpResults = await Future.wait(tcpTasks);
 
-      switch (p.result) {
-        case _TcpResult.open:
-        case _TcpResult.refused:
-          // Host definitivamente vivo → siempre incluir
-          if (!found.containsKey(p.ip)) {
-            print('>>> [TCP ✓] Host activo: ${p.ip} (${p.detail})');
-            found[p.ip] = _makeDevice(
-              ip: p.ip,
-              name: _guessByIp(p.ip),
-              mac: p.mac ?? arpTable[p.ip],
-              label: p.detail,
-              localIp: localIp,
-            );
-          } else {
-            print('>>> [TCP+] Confirmado por TCP: ${p.ip} (${p.detail})');
-          }
-          break;
+    for (final entry in tcpResults) {
+      if (entry == null) continue;
+      final ip = entry.key;
+      final method = entry.value;
 
-        case _TcpResult.timeout:
-          // DESCARTADO — timeout no es evidencia suficiente de host vivo.
-          // El kernel Android puede tardar >3s en enviar EHOSTUNREACH para
-          // IPs inexistentes, causando 100+ falsos positivos con timeout corto.
-          // Los hosts reales son capturados por ARP (FASE 1) o TCP RST/open.
-          break;
-
-        case _TcpResult.unreachable:
-          // IP vacía — definitivamente muerta, ignorar.
-          break;
+      if (!discovered.containsKey(ip)) {
+        print('>>> [TCP ✓] DISPOSITIVO ENCONTRADO: $ip | Método: $method');
+        discovered[ip] = _buildDevice(
+          ip: ip,
+          detectionMethod: method,
+          localIp: localIp,
+        );
+      } else {
+        print('>>> [TCP+UDP] Dispositivo $ip re-confirmado vía TCP ($method)');
       }
     }
 
-    // Asegurar que el propio teléfono aparezca siempre
-    found[localIp] ??= ConnectedDevice(
+    // Garantizar inclusión del dispositivo propio
+    discovered[localIp] ??= ConnectedDevice(
       id: parts[3],
       name: 'Este Teléfono (Android)',
       ipAddress: localIp,
@@ -191,277 +157,228 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
       interfaceLabel: 'Este Dispositivo',
     );
 
-    final List<ConnectedDevice> result = found.values.toList();
+    final List<ConnectedDevice> finalList = discovered.values.toList();
     sw.stop();
 
     print('>>> =======================================================');
-    print('>>> ESCANEO COMPLETADO EN ${(sw.elapsedMilliseconds / 1000).toStringAsFixed(2)}s');
-    print('>>> Dispositivos encontrados: ${result.length}');
-    for (final d in result) {
-      print('    → [${d.ipAddress}] ${d.name} | ${d.interfaceLabel}');
+    print('>>> ESCANEO MULTIPROTOCOLO COMPLETADO EN ${(sw.elapsedMilliseconds / 1000).toStringAsFixed(2)}s');
+    print('>>> Total de dispositivos consolidados: ${finalList.length}');
+    for (final dev in finalList) {
+      print('    -> [${dev.ipAddress}] ${dev.name} | ${dev.interfaceLabel}');
     }
     print('>>> =======================================================');
 
-    return result;
+    return finalList;
   }
 
-  // ─── FASE 0: ARP Kick ───────────────────────────────────────────────────
-  // Envía paquetes UDP a las 254 IPs en paralelo con timeout de 50ms.
-  // No importa el resultado — el objetivo es que el kernel Android
-  // emita peticiones ARP broadcast para cada IP.
-  Future<void> _arpKickParallel(String subnet, String localIp) async {
+  // ─────────────────────────────────────────────────────────────────────────
+  // CAPA 1: DESCOBRIMIENTO UDP MULTIPROTOCOLO (Escucha activa por 1.8 segundos)
+  // Configura RawDatagramSocket con reuseAddress=true y broadcastEnabled=true
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<Map<String, String>> _udpMultiprotocolDiscovery({
+    required String subnet,
+    required String broadcastIp,
+    required String localIp,
+  }) async {
+    final Map<String, String> discoveredUdp = {};
+
     try {
-      final RawDatagramSocket sock = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4, 0,
+      final RawDatagramSocket socket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        0,
+        reuseAddress: true,
       );
-      // Puerto 137 (NetBIOS) y 5353 (mDNS) — más probable que pasen el Wi-Fi
-      final List<int> kickPorts = [137, 5353, 80];
+      socket.broadcastEnabled = true;
+
+      // 1. Sonda WS-Discovery (WSD - UDP 3702) -> Multicast Windows 10/11
+      try {
+        final List<int> wsdBytes = _wsdProbeXml.codeUnits;
+        socket.send(wsdBytes, InternetAddress('239.255.255.250'), 3702);
+        socket.send(wsdBytes, InternetAddress(broadcastIp), 3702);
+      } catch (_) {}
+
+      // 2. Sonda SSDP / UPnP M-SEARCH (UDP 1900)
+      try {
+        socket.send(_ssdpMSearch, InternetAddress('239.255.255.250'), 1900);
+        socket.send(_ssdpMSearch, InternetAddress(broadcastIp), 1900);
+      } catch (_) {}
+
+      // 3. Consulta mDNS (UDP 5353) -> Multicast Apple / Smart TV / Android
+      try {
+        const List<int> mdnsQuery = [
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+          0x00, 0x00, 0x00, 0x00, 0x05, 0x5f, 0x68, 0x74,
+          0x74, 0x70, 0x04, 0x5f, 0x74, 0x63, 0x70, 0x05,
+          0x6c, 0x6f, 0x63, 0x61, 0x00, 0x00, 0x0c, 0x00, 0x01,
+        ];
+        socket.send(mdnsQuery, InternetAddress('224.0.0.251'), 5353);
+      } catch (_) {}
+
+      // 4. Sondas NetBIOS Unicast a cada IP de la subred (UDP 137)
       for (int i = 1; i <= 254; i++) {
         final target = '$subnet.$i';
         if (target == localIp) continue;
-        for (final p in kickPorts) {
-          try {
-            sock.send([0x00, 0x00, 0x00, 0x00], InternetAddress(target), p);
-          } catch (_) {}
-        }
-      }
-      await Future.delayed(const Duration(milliseconds: 50));
-      sock.close();
-      print('>>> [F0] ARP Kick enviado a 253 IPs de $subnet');
-    } catch (e) {
-      print('>>> [F0] ARP Kick error: $e');
-    }
-  }
-
-  // ─── FASE 1: Leer tabla ARP — VALIDACIÓN ESTRICTA ──────────────────────────
-  //
-  // Reglas de aceptación (solo entradas REALES, sin falsos positivos):
-  //   ✅ flags == '0x2' (entrada completa y válida)
-  //   ✅ MAC != '00:00:00:00:00:00' (no placeholder vacío)
-  //   ✅ IP en la subred local (no multicast 224.x, no broadcast)
-  //   ✅ IP no termina en .255 (no broadcast de subred)
-  //   ✅ IP no empieza en 224. / 239. / 255. (no multicast/broadcast)
-  //
-  // Intentos:
-  //   1. /proc/net/arp — directo (puede estar bloqueado por SELinux en Android 10+)
-  //   2. `ip neigh`   — fallback via proceso (también puede estar restringido)
-  Future<Map<String, String>> _readArpTable(String subnet, String localIp) async {
-    final Map<String, String> map = {};
-
-    bool _isValidArpEntry(String ip, String mac, {String? flags}) {
-      // Validar flags solo si se proveen (0x2 = COMPLETE, 0x0 = INCOMPLETE)
-      if (flags != null && flags != '0x2') return false;
-      // MAC real y no vacía
-      if (mac == '00:00:00:00:00:00' || mac.isEmpty) return false;
-      // No multicast ni broadcast
-      if (ip.endsWith('.255')) return false;
-      if (ip.startsWith('224.') || ip.startsWith('239.') || ip.startsWith('255.')) return false;
-      // Debe estar en la subred local
-      if (!ip.startsWith(subnet)) return false;
-      // No es el propio dispositivo
-      if (ip == localIp) return false;
-      return true;
-    }
-
-    // ── Intento 1: /proc/net/arp
-    try {
-      final f = File('/proc/net/arp');
-      if (await f.exists()) {
-        final lines = await f.readAsLines();
-        print('>>> [F1] /proc/net/arp leído — ${lines.length} líneas brutas');
-        // Formato: IP address  HW type  Flags  HW address  Mask  Device
-        // Ejemplo: 192.168.1.1  0x1  0x2  aa:bb:cc:dd:ee:ff  *  wlan0
-        int valid = 0;
-        for (int i = 1; i < lines.length; i++) {
-          final cols = lines[i].trim().split(RegExp(r'\s+'));
-          if (cols.length >= 4) {
-            final ip    = cols[0];
-            final flags = cols[2]; // '0x2' = completo, '0x0' = incompleto
-            final mac   = cols[3].toUpperCase();
-            if (_isValidArpEntry(ip, mac, flags: flags)) {
-              map[ip] = mac;
-              valid++;
-              print('>>> [ARP] Entrada válida: $ip → $mac (flags=$flags)');
-            } else {
-              print('>>> [ARP] Entrada descartada: $ip mac=$mac flags=$flags');
-            }
-          }
-        }
-        print('>>> [F1] /proc/net/arp — entradas válidas: $valid / ${lines.length - 1}');
-        return map;
-      } else {
-        print('>>> [F1] /proc/net/arp: no accesible (SELinux en Android 10+)');
-      }
-    } catch (e) {
-      print('>>> [F1] /proc/net/arp error: $e');
-    }
-
-    // ── Intento 2: ip neigh (fallback)
-    try {
-      print('>>> [F1] Fallback: ejecutando `ip neigh`...');
-      final res = await Process.run('ip', ['neigh'])
-          .timeout(const Duration(seconds: 3));
-      if (res.exitCode == 0 && res.stdout != null) {
-        final out = res.stdout as String;
-        // Formato: IP dev IFACE lladdr MAC state STATE
-        // Solo aceptar REACHABLE (equivale a flags=0x2)
-        for (final line in out.split('\n')) {
-          final cols = line.trim().split(RegExp(r'\s+'));
-          if (cols.length >= 5) {
-            final ip    = cols[0];
-            final state = cols.last.toUpperCase();
-            // Solo REACHABLE = entrada activa confirmada (STALE/DELAY son entradas antiguas no confirmadas)
-            if (state != 'REACHABLE') continue;
-            final li  = cols.indexOf('lladdr');
-            if (li < 0 || li + 1 >= cols.length) continue;
-            final mac = cols[li + 1].toUpperCase();
-            if (_isValidArpEntry(ip, mac)) {
-              map[ip] = mac;
-              print('>>> [ARP] ip neigh REACHABLE: $ip → $mac');
-            }
-          }
-        }
-        print('>>> [F1] `ip neigh` — entradas REACHABLE válidas: ${map.length}');
-      } else {
-        print('>>> [F1] `ip neigh` bloqueado (exit=${res.exitCode}) — SELinux');
-      }
-    } catch (e) {
-      print('>>> [F1] `ip neigh` error: $e');
-    }
-
-    return map;
-  }
-
-  // ─── FASE 2: UDP Broadcast ──────────────────────────────────────────────
-  Future<Map<String, String>> _udpBroadcast(
-    String subnet, String broadcast, String localIp,
-  ) async {
-    final Map<String, String> resp = {};
-    try {
-      final sock = await RawDatagramSocket.bind(
-        InternetAddress.anyIPv4, 0, reuseAddress: true,
-      );
-      sock.broadcastEnabled = true;
-
-      // SSDP broadcast + multicast
-      try { sock.send(_ssdpMSearch, InternetAddress(broadcast), 1900); } catch (_) {}
-      try { sock.send(_ssdpMSearch, InternetAddress('239.255.255.250'), 1900); } catch (_) {}
-
-      // NetBIOS unicast a cada IP
-      for (int i = 1; i <= 254; i++) {
-        final t = '$subnet.$i';
-        if (t == localIp) continue;
-        try { sock.send(_netbiosNameQuery, InternetAddress(t), 137); } catch (_) {}
+        try {
+          socket.send(_netbiosNameQuery, InternetAddress(target), 137);
+        } catch (_) {}
       }
 
-      // mDNS multicast
-      const List<int> mdns = [
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x05, 0x5f, 0x68, 0x74,
-        0x74, 0x70, 0x04, 0x5f, 0x74, 0x63, 0x70, 0x05,
-        0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x00, 0x00, 0x0c, 0x00, 0x01,
-      ];
-      try { sock.send(mdns, InternetAddress('224.0.0.251'), 5353); } catch (_) {}
-
-      final comp = Completer<void>();
-      Timer(const Duration(milliseconds: 500), () {
-        if (!comp.isCompleted) comp.complete();
+      // Escuchar respuestas acumuladas durante 1.8 segundos
+      final Completer<void> completer = Completer();
+      final Timer timer = Timer(const Duration(milliseconds: 1800), () {
+        if (!completer.isCompleted) completer.complete();
       });
 
-      sock.listen((event) {
+      socket.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
-          final dg = sock.receive();
+          final Datagram? dg = socket.receive();
           if (dg != null) {
-            final ip = dg.address.address;
-            if (ip != localIp &&
-                ip.startsWith(subnet) &&
-                !ip.endsWith('.255') &&
-                !resp.containsKey(ip)) {
-              String proto = 'UDP:${dg.port}';
-              if (dg.port == 1900 || dg.port == 1901) proto = 'SSDP/UPnP';
-              else if (dg.port == 137 || dg.port == 138) proto = 'NetBIOS';
-              else if (dg.port == 5353) proto = 'mDNS';
-              resp[ip] = proto;
+            final String senderIp = dg.address.address;
+            if (senderIp != localIp &&
+                senderIp.startsWith(subnet) &&
+                !senderIp.endsWith('.255') &&
+                !discoveredUdp.containsKey(senderIp)) {
+              
+              String protocol = 'UDP Response (Puerto ${dg.port})';
+              if (dg.port == 3702) {
+                protocol = 'Detectado por WS-Discovery LAN (Puerto 3702)';
+              } else if (dg.port == 1900 || dg.port == 1901) {
+                protocol = 'Detectado por SSDP / UPnP (Puerto 1900)';
+              } else if (dg.port == 5353) {
+                protocol = 'Detectado por mDNS Multicast (Puerto 5353)';
+              } else if (dg.port == 137 || dg.port == 138) {
+                protocol = 'Detectado por NetBIOS Windows (Puerto 137)';
+              }
+
+              discoveredUdp[senderIp] = protocol;
             }
           }
         }
       });
 
-      await comp.future;
-      sock.close();
+      await completer.future;
+      timer.cancel();
+      socket.close();
     } catch (_) {}
-    return resp;
+
+    return discoveredUdp;
   }
 
-  // ─── FASE 3: TCP Probe diferenciado (600ms timeout) ─────────────────────
-  Future<_ProbeResult> _tcpProbe(
-    String ip, List<int> ports, String localIp, String? knownMac,
+  // ─────────────────────────────────────────────────────────────────────────
+  // CAPA 3: BARRIDO PARALELO TCP (Conexión exitosa o RST / Connection Refused)
+  // Timeout estricto de 250ms por socket
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<MapEntry<String, String>?> _probeTcpHost(
+    String ip,
+    List<int> ports,
+    String localIp,
   ) async {
-    if (ip == localIp) {
-      return _ProbeResult(ip, _TcpResult.open, 'Este Dispositivo', mac: knownMac);
-    }
+    if (ip == localIp) return null;
 
     for (final port in ports) {
       try {
-        final Socket sock = await Socket.connect(
-          ip, port,
-          timeout: const Duration(milliseconds: 300),
+        final Socket socket = await Socket.connect(
+          ip,
+          port,
+          timeout: const Duration(milliseconds: 250),
         );
-        sock.destroy();
-        return _ProbeResult(ip, _TcpResult.open, _pl(port, 'Abierto'), mac: knownMac);
+        socket.destroy();
+        return MapEntry(ip, 'Detectado por TCP $port (Puerto Abierto)');
       } on SocketException catch (e) {
         final msg = e.message.toLowerCase();
         final err = e.toString().toLowerCase();
 
-        final bool isUnreachable =
-            msg.contains('unreachable') ||
+        // Evitar falsos positivos de ICMP Unreachable emitidos por el Router
+        final bool isUnreachable = msg.contains('unreachable') ||
             msg.contains('no route') ||
             err.contains('113') ||
-            err.contains('ehostunreach') ||
-            err.contains('enetunreach');
+            err.contains('ehostunreach');
 
-        if (isUnreachable) {
-          // IP vacía / muerta — no seguir probando puertos
-          return _ProbeResult(ip, _TcpResult.unreachable, 'EHOSTUNREACH', mac: knownMac);
-        }
-
-        if (msg.contains('refused') || msg.contains('reset')) {
-          // TCP RST del host — definitivamente vivo
-          return _ProbeResult(ip, _TcpResult.refused, _pl(port, 'RST'), mac: knownMac);
-        }
-        // Otro SocketException (ej. timeout del socket) → sigue probando
-      } on TimeoutException {
-        // Timeout puro — posiblemente vivo (Windows Firewall silencioso)
-        // Solo reportar en el ÚLTIMO puerto para no saturar logs
-        if (port == ports.last) {
-          return _ProbeResult(ip, _TcpResult.timeout, 'Timeout (${ports.join(',')}) - Posible Firewall', mac: knownMac);
+        // Si la conexión fue rechazada activamente por la máquina de destino (TCP RST)
+        if (!isUnreachable && (msg.contains('refused') || msg.contains('reset'))) {
+          return MapEntry(ip, 'Detectado por TCP $port (Rechazo Activo RST)');
         }
       } catch (_) {}
     }
-
-    // Todos los puertos dieron timeout → probablemente firewall activo
-    return _ProbeResult(
-      ip, _TcpResult.timeout,
-      'Timeout todos los puertos — Posible Firewall Windows',
-      mac: knownMac,
-    );
+    return null;
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // CAPA 2: Lectura estricta de la tabla ARP Kernel (/proc/net/arp o ip neigh)
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<Map<String, String>> _readArpTable(String subnet, String localIp) async {
+    final Map<String, String> map = {};
 
-  ConnectedDevice _makeDevice({
+    bool _isValid(String ip, String mac, {String? flags}) {
+      if (flags != null && flags != '0x2') return false;
+      if (mac == '00:00:00:00:00:00' || mac.isEmpty) return false;
+      if (ip.endsWith('.255')) return false;
+      if (ip.startsWith('224.') || ip.startsWith('239.') || ip.startsWith('255.')) return false;
+      if (!ip.startsWith(subnet) || ip == localIp) return false;
+      return true;
+    }
+
+    try {
+      final f = File('/proc/net/arp');
+      if (await f.exists()) {
+        final lines = await f.readAsLines();
+        for (int i = 1; i < lines.length; i++) {
+          final cols = lines[i].trim().split(RegExp(r'\s+'));
+          if (cols.length >= 4) {
+            final ip = cols[0];
+            final flags = cols[2];
+            final mac = cols[3].toUpperCase();
+            if (_isValid(ip, mac, flags: flags)) {
+              map[ip] = mac;
+            }
+          }
+        }
+        if (map.isNotEmpty) return map;
+      }
+    } catch (_) {}
+
+    try {
+      final res = await Process.run('ip', ['neigh']).timeout(const Duration(seconds: 2));
+      if (res.exitCode == 0 && res.stdout != null) {
+        for (final line in (res.stdout as String).split('\n')) {
+          final cols = line.trim().split(RegExp(r'\s+'));
+          if (cols.length >= 5) {
+            final ip = cols[0];
+            final state = cols.last.toUpperCase();
+            if (state == 'REACHABLE') {
+              final li = cols.indexOf('lladdr');
+              if (li >= 0 && li + 1 < cols.length) {
+                final mac = cols[li + 1].toUpperCase();
+                if (_isValid(ip, mac)) map[ip] = mac;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    return map;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Helper de construcción de entidad
+  // ─────────────────────────────────────────────────────────────────────────
+  ConnectedDevice _buildDevice({
     required String ip,
-    required String name,
-    required String? mac,
-    required String label,
+    required String detectionMethod,
     required String localIp,
+    String? mac,
   }) {
     final bool isSelf = ip == localIp;
-    final hex = int.parse(ip.split('.').last)
-        .toRadixString(16).padLeft(2, '0').toUpperCase();
-    final resolvedMac = isSelf
+    final String hostHex = int.parse(ip.split('.').last).toRadixString(16).padLeft(2, '0').toUpperCase();
+    final String resolvedMac = isSelf
         ? '02:00:00:00:00:LOCAL'
-        : (mac != null && mac != '00:00:00:00:00:00' ? mac : '02:00:00:00:00:$hex');
+        : (mac != null && mac != '00:00:00:00:00:00' ? mac : '02:00:00:00:00:$hostHex');
+
+    String name = 'Dispositivo de Red ($ip)';
+    if (ip.endsWith('.1')) {
+      name = 'Router / Gateway Principal';
+    }
 
     return ConnectedDevice(
       id: ip.split('.').last,
@@ -470,27 +387,7 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
       macAddress: resolvedMac,
       isOnline: true,
       interfaceType: isSelf ? DeviceInterfaceType.wifi50 : DeviceInterfaceType.wifi24,
-      interfaceLabel: label,
+      interfaceLabel: detectionMethod,
     );
-  }
-
-  String _guessByIp(String ip) {
-    if (ip.endsWith('.1')) return 'Router / Gateway Principal';
-    return 'Equipo ($ip)';
-  }
-
-  String _pl(int port, String status) {
-    const Map<int, String> labels = {
-      135: 'Windows RPC',
-      139: 'NetBIOS/SMB',
-      445: 'SMB Archivos',
-      5357: 'WSD Windows',
-      2869: 'UPnP Eventing',
-      5353: 'mDNS',
-      80: 'HTTP',
-      443: 'HTTPS',
-      8080: 'HTTP Alt',
-    };
-    return '${labels[port] ?? 'P$port'} ($status)';
   }
 }
