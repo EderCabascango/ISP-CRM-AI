@@ -96,11 +96,20 @@ class HomeScreen extends StatelessWidget {
             _MenuCard(
               icon: Icons.wifi,
               title: "Mi Wi-Fi",
-              description: "Cambia SSID, contraseña y gestiona frecuencias",
+              description: "Estado de frecuencias y redes 2.4GHz / 5GHz",
               onTap: () => context.push('/wifi'),
             ),
             const SizedBox(height: 12),
             
+            // BOTÓN REDIRECCIÓN ACTUALIZAR CREDENCIALES WI-FI (API POST)
+            _MenuCard(
+              icon: Icons.vpn_key_outlined,
+              title: "Cambiar Clave Wi-Fi",
+              description: "Actualiza el SSID y contraseña directamente en tu Router",
+              onTap: () => context.push('/wifi-credentials'),
+            ),
+            const SizedBox(height: 12),
+
             // BOTÓN REDIRECCIÓN DISPOSITIVOS
             _MenuCard(
               icon: Icons.devices,

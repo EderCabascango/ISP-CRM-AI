@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../features/auth/presentation/screens/login_screen.dart';
 import '../../../features/home/presentation/screens/home_screen.dart';
 import '../../../features/wifi/presentation/screens/wifi_settings_screen.dart';
+import '../../../features/wifi_management/presentation/screens/wifi_credentials_screen.dart';
 import '../../../features/devices/presentation/screens/devices_screen.dart';
 import '../../../features/auth/presentation/blocs/auth_bloc.dart';
 import '../../../features/wifi/presentation/blocs/wifi_cubit.dart';
@@ -41,6 +42,10 @@ GoRouter createAppRouter(AuthBloc authBloc) {
           value: context.read<WifiCubit>()..loadSettings(),
           child: const WifiSettingsScreen(),
         ),
+      ),
+      GoRoute(
+        path: '/wifi-credentials',
+        builder: (context, state) => const WifiCredentialsScreen(),
       ),
       GoRoute(
         path: '/devices',
