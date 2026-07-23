@@ -49,7 +49,7 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
   Future<List<ConnectedDevice>> getConnectedDevices() async {
     final Stopwatch sw = Stopwatch()..start();
     print('>>> =======================================================');
-    print('>>> ISP Scanner v1.0.10 — ARP Kick + ARP Read + TCP Diferenciado');
+    print('>>> ISP Scanner v1.0.11 — ARP Estricto + TCP Sin Falsos Positivos');
 
     // ── Permisos
     final permStatus = await Permission.location.request();
@@ -126,26 +126,19 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
     }
 
     // ═══════════════════════════════════════════════════════
-    // FASE 3 — TCP PARALELO CON ANÁLISIS DIFERENCIADO (600ms)
+    // FASE 3 — TCP PARALELO (300ms timeout)
     //
-    // CLAVE TÉCNICA: distinguir 3 escenarios:
+    // Solo se considera vivo un host si:
+    //  ① Conexión exitosa (puerto abierto)
+    //  ② errno 111 / "refused" / "reset" → TCP RST del host destino
     //
-    //  ① errno 111 / "refused" / "reset" → HOST VIVO
-    //    El host destino envió un TCP RST (puerto cerrado pero activo)
+    // Timeout → DESCARTADO (el kernel tarda ~3s en emitir EHOSTUNREACH
+    //   para IPs que no existen, más que nuestro timeout → falsos positivos)
     //
-    //  ② TIMEOUT (sin EHOSTUNREACH) → HOST PROBABLEMENTE VIVO
-    //    El kernel resolvió la ARP (el host existe en la red),
-    //    pero el Firewall de Windows descartó el paquete TCP
-    //    silenciosamente. Para IPs locales, un timeout genuino
-    //    indica que la tarjeta de red del host recibió el ARP
-    //    y respondió con su MAC, pero el firewall bloqueó TCP.
-    //
-    //  ③ errno 113 / "unreachable" / "no route" → IP VACÍA / MUERTA
-    //    El router respondió ICMP Destination Unreachable —
-    //    la IP no tiene dispositivo asignado. Ignorar.
+    // EHOSTUNREACH (errno 113) → IP vacía, descartada.
     // ═══════════════════════════════════════════════════════
     final List<int> ports = [135, 139, 445, 5357, 2869, 80, 443, 5353, 8080];
-    print('>>> [F3] TCP DIFERENCIADO — 254 IPs × ${ports.length} puertos (600ms timeout)...');
+    print('>>> [F3] TCP ESTRICTO — 254 IPs × ${ports.length} puertos (300ms timeout)...');
 
     final List<Future<_ProbeResult>> tasks = [
       for (int i = 1; i <= 254; i++)
@@ -170,27 +163,19 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
               localIp: localIp,
             );
           } else {
-            print('>>> [TCP+] Confirmado: ${p.ip} (${p.detail})');
+            print('>>> [TCP+] Confirmado por TCP: ${p.ip} (${p.detail})');
           }
           break;
 
         case _TcpResult.timeout:
-          // Timeout = posiblemente vivo (ARP OK, firewall bloqueó TCP)
-          // Solo agregar si NO fue ya encontrado por ARP/UDP
-          if (!found.containsKey(p.ip)) {
-            print('>>> [FW?] Posible dispositivo con firewall: ${p.ip} (${p.detail})');
-            found[p.ip] = _makeDevice(
-              ip: p.ip,
-              name: _guessByIp(p.ip),
-              mac: p.mac ?? arpTable[p.ip],
-              label: 'Posible Dispositivo (Firewall - ${p.detail})',
-              localIp: localIp,
-            );
-          }
+          // DESCARTADO — timeout no es evidencia suficiente de host vivo.
+          // El kernel Android puede tardar >3s en enviar EHOSTUNREACH para
+          // IPs inexistentes, causando 100+ falsos positivos con timeout corto.
+          // Los hosts reales son capturados por ARP (FASE 1) o TCP RST/open.
           break;
 
         case _TcpResult.unreachable:
-          // IP vacía — silencio total, no agregar
+          // IP vacía — definitivamente muerta, ignorar.
           break;
       }
     }
@@ -248,69 +233,97 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
     }
   }
 
-  // ─── FASE 1: Leer tabla ARP ──────────────────────────────────────────────
-  // Intento 1: /proc/net/arp (bloqueado en Android 10+ por SELinux)
-  // Intento 2: `ip neigh` (también puede estar restringido)
-  // Retorna mapa {ip → mac} solo con entradas válidas y activas.
+  // ─── FASE 1: Leer tabla ARP — VALIDACIÓN ESTRICTA ──────────────────────────
+  //
+  // Reglas de aceptación (solo entradas REALES, sin falsos positivos):
+  //   ✅ flags == '0x2' (entrada completa y válida)
+  //   ✅ MAC != '00:00:00:00:00:00' (no placeholder vacío)
+  //   ✅ IP en la subred local (no multicast 224.x, no broadcast)
+  //   ✅ IP no termina en .255 (no broadcast de subred)
+  //   ✅ IP no empieza en 224. / 239. / 255. (no multicast/broadcast)
+  //
+  // Intentos:
+  //   1. /proc/net/arp — directo (puede estar bloqueado por SELinux en Android 10+)
+  //   2. `ip neigh`   — fallback via proceso (también puede estar restringido)
   Future<Map<String, String>> _readArpTable(String subnet, String localIp) async {
     final Map<String, String> map = {};
 
-    // Intento 1: /proc/net/arp
+    bool _isValidArpEntry(String ip, String mac, {String? flags}) {
+      // Validar flags solo si se proveen (0x2 = COMPLETE, 0x0 = INCOMPLETE)
+      if (flags != null && flags != '0x2') return false;
+      // MAC real y no vacía
+      if (mac == '00:00:00:00:00:00' || mac.isEmpty) return false;
+      // No multicast ni broadcast
+      if (ip.endsWith('.255')) return false;
+      if (ip.startsWith('224.') || ip.startsWith('239.') || ip.startsWith('255.')) return false;
+      // Debe estar en la subred local
+      if (!ip.startsWith(subnet)) return false;
+      // No es el propio dispositivo
+      if (ip == localIp) return false;
+      return true;
+    }
+
+    // ── Intento 1: /proc/net/arp
     try {
       final f = File('/proc/net/arp');
       if (await f.exists()) {
         final lines = await f.readAsLines();
-        print('>>> [F1] /proc/net/arp leído. ${lines.length} líneas.');
-        // Columnas: IP addr  HW type  Flags  HW addr  Mask  Device
+        print('>>> [F1] /proc/net/arp leído — ${lines.length} líneas brutas');
+        // Formato: IP address  HW type  Flags  HW address  Mask  Device
+        // Ejemplo: 192.168.1.1  0x1  0x2  aa:bb:cc:dd:ee:ff  *  wlan0
+        int valid = 0;
         for (int i = 1; i < lines.length; i++) {
           final cols = lines[i].trim().split(RegExp(r'\s+'));
           if (cols.length >= 4) {
-            final ip = cols[0];
-            final flags = cols[2]; // 0x0 = incompleto, 0x2 = válido
-            final mac = cols[3].toUpperCase();
-            if (flags != '0x0' &&
-                mac != '00:00:00:00:00:00' &&
-                ip.startsWith(subnet) &&
-                ip != localIp) {
+            final ip    = cols[0];
+            final flags = cols[2]; // '0x2' = completo, '0x0' = incompleto
+            final mac   = cols[3].toUpperCase();
+            if (_isValidArpEntry(ip, mac, flags: flags)) {
               map[ip] = mac;
+              valid++;
+              print('>>> [ARP] Entrada válida: $ip → $mac (flags=$flags)');
+            } else {
+              print('>>> [ARP] Entrada descartada: $ip mac=$mac flags=$flags');
             }
           }
         }
-        print('>>> [F1] MACs válidas en /proc/net/arp: ${map.length}');
+        print('>>> [F1] /proc/net/arp — entradas válidas: $valid / ${lines.length - 1}');
         return map;
       } else {
-        print('>>> [F1] /proc/net/arp: archivo no accesible (SELinux)');
+        print('>>> [F1] /proc/net/arp: no accesible (SELinux en Android 10+)');
       }
     } catch (e) {
       print('>>> [F1] /proc/net/arp error: $e');
     }
 
-    // Intento 2: ip neigh
+    // ── Intento 2: ip neigh (fallback)
     try {
-      print('>>> [F1] Intentando `ip neigh`...');
+      print('>>> [F1] Fallback: ejecutando `ip neigh`...');
       final res = await Process.run('ip', ['neigh'])
           .timeout(const Duration(seconds: 3));
       if (res.exitCode == 0 && res.stdout != null) {
         final out = res.stdout as String;
+        // Formato: IP dev IFACE lladdr MAC state STATE
+        // Solo aceptar REACHABLE (equivale a flags=0x2)
         for (final line in out.split('\n')) {
           final cols = line.trim().split(RegExp(r'\s+'));
           if (cols.length >= 5) {
-            final ip = cols[0];
+            final ip    = cols[0];
             final state = cols.last.toUpperCase();
-            if ((state == 'REACHABLE' || state == 'STALE' || state == 'DELAY') &&
-                ip.startsWith(subnet) &&
-                ip != localIp) {
-              final li = cols.indexOf('lladdr');
-              if (li >= 0 && li + 1 < cols.length) {
-                final mac = cols[li + 1].toUpperCase();
-                if (mac != '00:00:00:00:00:00') map[ip] = mac;
-              }
+            // Solo REACHABLE = entrada activa confirmada (STALE/DELAY son entradas antiguas no confirmadas)
+            if (state != 'REACHABLE') continue;
+            final li  = cols.indexOf('lladdr');
+            if (li < 0 || li + 1 >= cols.length) continue;
+            final mac = cols[li + 1].toUpperCase();
+            if (_isValidArpEntry(ip, mac)) {
+              map[ip] = mac;
+              print('>>> [ARP] ip neigh REACHABLE: $ip → $mac');
             }
           }
         }
-        print('>>> [F1] MACs válidas en `ip neigh`: ${map.length}');
+        print('>>> [F1] `ip neigh` — entradas REACHABLE válidas: ${map.length}');
       } else {
-        print('>>> [F1] `ip neigh` bloqueado (SELinux, exit=${res.exitCode})');
+        print('>>> [F1] `ip neigh` bloqueado (exit=${res.exitCode}) — SELinux');
       }
     } catch (e) {
       print('>>> [F1] `ip neigh` error: $e');
@@ -390,9 +403,9 @@ class DevicesLocalScannerDataSourceImpl implements DeviceDataSource {
 
     for (final port in ports) {
       try {
-        final sock = await Socket.connect(
+        final Socket sock = await Socket.connect(
           ip, port,
-          timeout: const Duration(milliseconds: 600),
+          timeout: const Duration(milliseconds: 300),
         );
         sock.destroy();
         return _ProbeResult(ip, _TcpResult.open, _pl(port, 'Abierto'), mac: knownMac);
