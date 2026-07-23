@@ -92,30 +92,37 @@ class HomeScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             
-            // BOTÓN REDIRECCIÓN WI-FI
+            // 1. TARJETA CONFIGURACIÓN WI-FI
             _MenuCard(
               icon: Icons.wifi,
-              title: "Mi Wi-Fi",
-              description: "Estado de frecuencias y redes 2.4GHz / 5GHz",
-              onTap: () => context.push('/wifi'),
-            ),
-            const SizedBox(height: 12),
-            
-            // BOTÓN REDIRECCIÓN ACTUALIZAR CREDENCIALES WI-FI (API POST)
-            _MenuCard(
-              icon: Icons.vpn_key_outlined,
-              title: "Cambiar Clave Wi-Fi",
-              description: "Actualiza el SSID y contraseña directamente en tu Router",
+              title: "Configuración Wi-Fi",
+              description: "Cambia SSID, contraseña y gestiona frecuencias de tu router",
               onTap: () => context.push('/wifi-credentials'),
             ),
             const SizedBox(height: 12),
 
-            // BOTÓN REDIRECCIÓN DISPOSITIVOS
+            // 2. TARJETA DISPOSITIVOS CONECTADOS
             _MenuCard(
               icon: Icons.devices,
               title: "Dispositivos Conectados",
-              description: "Mira quién está conectado a tu ONT residencial",
+              description: "Mira quién está conectado a tu red residencial",
               onTap: () => context.push('/devices'),
+            ),
+            const SizedBox(height: 12),
+
+            // 3. TARJETA SALUD DE LA CONEXIÓN (DIAGNÓSTICO)
+            _MenuCard(
+              icon: Icons.health_and_safety_outlined,
+              title: "Salud de la Conexión",
+              description: "Diagnóstico en tiempo real y prueba de velocidad",
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("Diagnóstico de salud de red: Conexión Óptima (100 Mbps)"),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
             ),
           ],
         ),

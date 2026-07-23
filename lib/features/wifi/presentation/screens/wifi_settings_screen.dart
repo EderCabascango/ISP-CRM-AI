@@ -128,11 +128,13 @@ class _WifiSettingsScreenState extends State<WifiSettingsScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                "Frecuencia 2.4 GHz",
-                                style: theme.textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: theme.colorScheme.primary,
+                              Expanded(
+                                child: Text(
+                                  "Frecuencia 2.4 GHz",
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                    color: theme.colorScheme.primary,
+                                  ),
                                 ),
                               ),
                               Switch(
@@ -204,11 +206,13 @@ class _WifiSettingsScreenState extends State<WifiSettingsScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                "Frecuencia 5 GHz (Alta Velocidad)",
-                                style: theme.textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: theme.colorScheme.primary,
+                              Expanded(
+                                child: Text(
+                                  "Frecuencia 5 GHz (Alta Velocidad)",
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                    color: theme.colorScheme.primary,
+                                  ),
                                 ),
                               ),
                               Switch(
