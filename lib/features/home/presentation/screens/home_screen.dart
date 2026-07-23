@@ -106,7 +106,7 @@ class HomeScreen extends StatelessWidget {
               icon: Icons.devices,
               title: "Dispositivos Conectados",
               description: "Mira quién está conectado a tu red residencial",
-              onTap: () => context.push('/devices'),
+              onTap: () => context.push('/connected-devices'),
             ),
             const SizedBox(height: 12),
 
@@ -114,8 +114,34 @@ class HomeScreen extends StatelessWidget {
             _MenuCard(
               icon: Icons.health_and_safety_outlined,
               title: "Salud de la Conexión",
-              description: "Diagnóstico en tiempo real y prueba de velocidad",
+              description: "Diagnóstico en tiempo real del estado de tu red",
               onTap: () => context.push('/network-health'),
+            ),
+            const SizedBox(height: 12),
+
+            // 4. TARJETA PRUEBA DE VELOCIDAD & OPTIMIZACIÓN
+            _MenuCard(
+              icon: Icons.speed,
+              title: "Test de Velocidad & Wi-Fi",
+              description: "Mide tu velocidad en Mbps y optimiza tu canal Wi-Fi",
+              onTap: () => context.push('/speedtest'),
+            ),
+            const SizedBox(height: 24),
+
+            Text(
+              "Servicios & Cuenta",
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // 5. TARJETA MI CUENTA & SERVICIOS
+            _MenuCard(
+              icon: Icons.receipt_long,
+              title: "Facturación & Soporte",
+              description: "Paga tu factura, descargas PDF y tickets de soporte",
+              onTap: () => context.push('/account-billing'),
             ),
           ],
         ),

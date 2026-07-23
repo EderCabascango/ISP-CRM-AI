@@ -70,7 +70,7 @@ class _NetworkHealthView extends StatelessWidget {
           return SingleChildScrollView(
             padding: const EdgeInsets.all(20.0),
             child: Column(
-              crossAxisAlignment: CrossAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // 1. TARJETA PRINCIPAL SEMÁFORO
                 _buildTrafficLightCard(context, result, isLoading),
@@ -415,13 +415,13 @@ class _NetworkHealthView extends StatelessWidget {
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Row(
-        crossAxisAlignment: CrossAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(icon, color: color, size: 28),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   title,

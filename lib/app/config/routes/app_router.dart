@@ -7,7 +7,10 @@ import '../../../features/home/presentation/screens/home_screen.dart';
 import '../../../features/wifi/presentation/screens/wifi_settings_screen.dart';
 import '../../../features/wifi_management/presentation/screens/wifi_credentials_screen.dart';
 import '../../../features/devices/presentation/screens/devices_screen.dart';
+import '../../../features/connected_devices/presentation/screens/connected_devices_screen.dart';
 import '../../../features/network_health/presentation/screens/network_health_screen.dart';
+import '../../../features/speedtest_optimization/presentation/screens/speedtest_screen.dart';
+import '../../../features/account_billing/presentation/screens/account_billing_screen.dart';
 import '../../../features/auth/presentation/blocs/auth_bloc.dart';
 import '../../../features/wifi/presentation/blocs/wifi_cubit.dart';
 import '../../../features/devices/presentation/blocs/devices_bloc.dart';
@@ -58,6 +61,18 @@ GoRouter createAppRouter(AuthBloc authBloc) {
       GoRoute(
         path: '/network-health',
         builder: (context, state) => const NetworkHealthScreen(),
+      ),
+      GoRoute(
+        path: '/connected-devices',
+        builder: (context, state) => const ConnectedDevicesScreen(),
+      ),
+      GoRoute(
+        path: '/speedtest',
+        builder: (context, state) => const SpeedtestScreen(),
+      ),
+      GoRoute(
+        path: '/account-billing',
+        builder: (context, state) => const AccountBillingScreen(),
       ),
     ],
   );
