@@ -115,14 +115,7 @@ class HomeScreen extends StatelessWidget {
               icon: Icons.health_and_safety_outlined,
               title: "Salud de la Conexión",
               description: "Diagnóstico en tiempo real y prueba de velocidad",
-              onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text("Diagnóstico de salud de red: Conexión Óptima (100 Mbps)"),
-                    behavior: SnackBarBehavior.floating,
-                  ),
-                );
-              },
+              onTap: () => context.push('/network-health'),
             ),
           ],
         ),

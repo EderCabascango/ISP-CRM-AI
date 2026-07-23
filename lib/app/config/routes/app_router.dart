@@ -7,6 +7,7 @@ import '../../../features/home/presentation/screens/home_screen.dart';
 import '../../../features/wifi/presentation/screens/wifi_settings_screen.dart';
 import '../../../features/wifi_management/presentation/screens/wifi_credentials_screen.dart';
 import '../../../features/devices/presentation/screens/devices_screen.dart';
+import '../../../features/network_health/presentation/screens/network_health_screen.dart';
 import '../../../features/auth/presentation/blocs/auth_bloc.dart';
 import '../../../features/wifi/presentation/blocs/wifi_cubit.dart';
 import '../../../features/devices/presentation/blocs/devices_bloc.dart';
@@ -53,6 +54,10 @@ GoRouter createAppRouter(AuthBloc authBloc) {
           value: context.read<DevicesBloc>()..add(FetchDevicesEvent()),
           child: const DevicesScreen(),
         ),
+      ),
+      GoRoute(
+        path: '/network-health',
+        builder: (context, state) => const NetworkHealthScreen(),
       ),
     ],
   );
